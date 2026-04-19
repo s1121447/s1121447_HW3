@@ -43,7 +43,6 @@ MAX_HISTORY_MESSAGES = 6
 # Gemini 模型候選，先試前面，失敗再往後 fallback
 MODEL_CANDIDATES = [
     "gemini-2.5-flash",
-    "gemini-1.5-flash",
 ]
 
 
@@ -145,48 +144,32 @@ def ask_gemini(user_id, user_message):
     print("user_message =", user_message)
     print("prompt preview =", repr(prompt[:300]))
 
-    last_error = None
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        response = model.generate_content(prompt)
 
-    for model_name in MODEL_CANDIDATES:
-        try:
-            print(f"Trying model: {model_name}")
+        print("Gemini response object =", response)
 
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
+        if response is None:
+            print("Gemini response is None")
+            return "抱歉，目前模型沒有回傳內容，請稍後再試。"
 
-            print("Gemini response object =", response)
+        if hasattr(response, "text"):
+            print("Gemini response.text =", repr(response.text))
+            if response.text and response.text.strip():
+                return response.text.strip()
 
-            if response is None:
-                print(f"{model_name}: response is None")
-                continue
+        print("Gemini response text is empty")
+        return "抱歉，目前模型沒有回傳有效內容，請稍後再試。"
 
-            if hasattr(response, "text"):
-                print(f"{model_name}: response.text =", repr(response.text))
-                if response.text and response.text.strip():
-                    return response.text.strip()
-                else:
-                    print(f"{model_name}: response.text is empty")
-                    continue
+    except Exception as e:
+        print("gemini-2.5-flash error:", repr(e))
 
-            print(f"{model_name}: response has no text attribute")
-            continue
+        err = str(e).lower()
+        if "429" in err or "quota" in err or "resourceexhausted" in err:
+            return "目前 Gemini 免費額度暫時用完了，請稍後再試。"
 
-        except Exception as e:
-            last_error = str(e)
-            print(f"{model_name} error:", repr(e))
-
-            # 如果是 429，直接換下一個模型試
-            if "429" in str(e) or "quota" in str(e).lower():
-                continue
-
-            # 其他錯誤也先記錄，繼續試下一個模型
-            continue
-
-    # 全部模型都失敗後的回覆
-    if last_error and ("429" in last_error or "quota" in last_error.lower()):
-        return "目前請求量較高或額度暫時受限，請稍後再試。"
-
-    return "抱歉，系統目前忙碌中，請稍後再試。"
+        return "抱歉，系統目前忙碌中，請稍後再試。"
 
 
 # =========================
@@ -222,16 +205,22 @@ def handle_message(event):
     print("user_id =", user_id)
     print("received message =", user_message)
 
-    # 先問 Gemini，再存歷史，避免同一句重複進 prompt
     bot_reply = ask_gemini(user_id, user_message)
 
     print("bot_reply =", bot_reply)
 
-    # 儲存歷史
     append_user_history(user_id, "user", user_message)
-    append_user_history(user_id, "assistant", bot_reply)
 
-    # 回覆 LINE
+    error_replies = {
+        "抱歉，系統目前忙碌中，請稍後再試。",
+        "目前 Gemini 免費額度暫時用完了，請稍後再試。",
+        "抱歉，目前模型沒有回傳內容，請稍後再試。",
+        "抱歉，目前模型沒有回傳有效內容，請稍後再試。"
+    }
+
+    if bot_reply not in error_replies:
+        append_user_history(user_id, "assistant", bot_reply)
+
     try:
         line_bot_api.reply_message(
             event.reply_token,
