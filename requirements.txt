@@ -2,3 +2,4 @@ flask
 python-dotenv
 line-bot-sdk
 google-generativeai
+gunicorn
