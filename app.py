@@ -13,7 +13,7 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
 
 # =========================
-# 基本設定
+# 載入環境變數
 # =========================
 load_dotenv()
 
@@ -22,28 +22,43 @@ LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET or not GEMINI_API_KEY:
-    raise ValueError("請確認 .env 已正確設定 LINE_CHANNEL_ACCESS_TOKEN、LINE_CHANNEL_SECRET、GEMINI_API_KEY")
+    raise ValueError("請確認 .env 或 Render 環境變數已正確設定")
 
+# Gemini 設定
+genai.configure(api_key=GEMINI_API_KEY)
 
+# Flask app
 app = Flask(__name__)
 
+# LINE Bot
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash")
-
+# 歷史紀錄檔
 HISTORY_FILE = "history.json"
 
+# 每次只保留最近幾筆歷史，避免 prompt 太長、太耗額度
+MAX_HISTORY_MESSAGES = 6
+
+# Gemini 模型候選，先試前面，失敗再往後 fallback
+MODEL_CANDIDATES = [
+    "gemini-2.5-flash",
+    "gemini-1.5-flash",
+]
+
+
+# =========================
+# 基本首頁（Render 健康檢查用）
+# =========================
 @app.route("/", methods=["GET"])
 def home():
     return "LINE Gemini Bot is running on Render"
 
+
 # =========================
-# 工具函式：歷史紀錄讀寫
+# 工具函式：history.json 讀寫
 # =========================
 def load_history():
-    """讀取 history.json，若檔案不存在或內容錯誤則回傳空 dict"""
     if not os.path.exists(HISTORY_FILE):
         return {}
 
@@ -55,19 +70,16 @@ def load_history():
 
 
 def save_history(history_data):
-    """將歷史紀錄寫回 history.json"""
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(history_data, f, ensure_ascii=False, indent=2)
 
 
 def get_user_history(user_id):
-    """取得指定 user_id 的歷史紀錄，若不存在則回傳空 list"""
     history_data = load_history()
     return history_data.get(user_id, [])
 
 
 def append_user_history(user_id, role, content):
-    """新增一筆對話到指定 user 的歷史紀錄"""
     history_data = load_history()
 
     if user_id not in history_data:
@@ -83,7 +95,6 @@ def append_user_history(user_id, role, content):
 
 
 def delete_user_history(user_id):
-    """刪除指定 user 的所有歷史紀錄"""
     history_data = load_history()
 
     if user_id in history_data:
@@ -95,18 +106,19 @@ def delete_user_history(user_id):
 
 
 # =========================
-# 工具函式：整理 Gemini 上下文
+# 工具函式：組 prompt
 # =========================
 def build_prompt_from_history(user_id, user_message):
-    """
-    把歷史紀錄整理成 prompt，讓 Gemini 可以記住上下文
-    """
     history = get_user_history(user_id)
+
+    # 只取最近幾筆，降低額度消耗
+    history = history[-MAX_HISTORY_MESSAGES:]
 
     system_prompt = (
         "你是一個友善、清楚、簡潔的 LINE AI 聊天助理。"
-        "請使用繁體中文回答。"
-        "若使用者有延續前文的問題，請根據歷史對話內容回答。"
+        "請一律使用繁體中文回答。"
+        "如果使用者的問題和先前對話有關，請根據歷史內容延續回答。"
+        "回答盡量自然，不要太冗長。"
     )
 
     conversation_text = ""
@@ -118,22 +130,63 @@ def build_prompt_from_history(user_id, user_message):
 
     conversation_text += f"使用者：{user_message}\n助理："
 
-    final_prompt = f"{system_prompt}\n\n以下是之前的對話紀錄：\n{conversation_text}"
+    final_prompt = f"{system_prompt}\n\n以下是最近的對話紀錄：\n{conversation_text}"
     return final_prompt
 
 
+# =========================
+# 工具函式：問 Gemini
+# =========================
 def ask_gemini(user_id, user_message):
-    """呼叫 Gemini 取得回答"""
     prompt = build_prompt_from_history(user_id, user_message)
 
-    try:
-        response = model.generate_content(prompt)
-        if response and hasattr(response, "text") and response.text:
-            return response.text.strip()
-        return "抱歉，我目前無法產生回應。"
-    except Exception as e:
-        print("Gemini API error:", e)
-        return "抱歉，系統目前忙碌中，請稍後再試。"
+    print("=== ask_gemini start ===")
+    print("user_id =", user_id)
+    print("user_message =", user_message)
+    print("prompt preview =", repr(prompt[:300]))
+
+    last_error = None
+
+    for model_name in MODEL_CANDIDATES:
+        try:
+            print(f"Trying model: {model_name}")
+
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+
+            print("Gemini response object =", response)
+
+            if response is None:
+                print(f"{model_name}: response is None")
+                continue
+
+            if hasattr(response, "text"):
+                print(f"{model_name}: response.text =", repr(response.text))
+                if response.text and response.text.strip():
+                    return response.text.strip()
+                else:
+                    print(f"{model_name}: response.text is empty")
+                    continue
+
+            print(f"{model_name}: response has no text attribute")
+            continue
+
+        except Exception as e:
+            last_error = str(e)
+            print(f"{model_name} error:", repr(e))
+
+            # 如果是 429，直接換下一個模型試
+            if "429" in str(e) or "quota" in str(e).lower():
+                continue
+
+            # 其他錯誤也先記錄，繼續試下一個模型
+            continue
+
+    # 全部模型都失敗後的回覆
+    if last_error and ("429" in last_error or "quota" in last_error.lower()):
+        return "目前請求量較高或額度暫時受限，請稍後再試。"
+
+    return "抱歉，系統目前忙碌中，請稍後再試。"
 
 
 # =========================
@@ -144,12 +197,17 @@ def callback():
     signature = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
 
+    print("=== /callback received ===")
+    print("signature =", signature)
+    print("body =", body[:500])
+
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
+        print("InvalidSignatureError")
         abort(400)
     except Exception as e:
-        print("Webhook handle error:", e)
+        print("Webhook handle error:", repr(e))
         abort(500)
 
     return "OK"
@@ -160,25 +218,32 @@ def handle_message(event):
     user_id = event.source.user_id
     user_message = event.message.text.strip()
 
+    print("=== handle_message ===")
     print("user_id =", user_id)
-    # 先存使用者訊息
-    append_user_history(user_id, "user", user_message)
+    print("received message =", user_message)
 
-    # 呼叫 Gemini
+    # 先問 Gemini，再存歷史，避免同一句重複進 prompt
     bot_reply = ask_gemini(user_id, user_message)
 
-    # 存機器人回覆
+    print("bot_reply =", bot_reply)
+
+    # 儲存歷史
+    append_user_history(user_id, "user", user_message)
     append_user_history(user_id, "assistant", bot_reply)
 
-    # 回傳給 LINE
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=bot_reply)
-    )
+    # 回覆 LINE
+    try:
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=bot_reply)
+        )
+        print("reply_message success")
+    except Exception as e:
+        print("reply_message error:", repr(e))
 
 
 # =========================
-# RESTful API：取得歷史對話
+# RESTful API：GET 歷史
 # =========================
 @app.route("/history/<user_id>", methods=["GET"])
 def get_history(user_id):
@@ -190,7 +255,7 @@ def get_history(user_id):
 
 
 # =========================
-# RESTful API：刪除歷史對話
+# RESTful API：DELETE 歷史
 # =========================
 @app.route("/history/<user_id>", methods=["DELETE"])
 def remove_history(user_id):
