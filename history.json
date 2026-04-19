@@ -1,0 +1,36 @@
+{
+  "U123456789": [
+    {
+      "role": "user",
+      "content": "你好",
+      "timestamp": "2026-04-19 15:30:00"
+    },
+    {
+      "role": "assistant",
+      "content": "你好，我是你的 Gemini LINE Bot。",
+      "timestamp": "2026-04-19 15:30:02"
+    }
+  ],
+  "Uf18d1f092277cc77a346b7e0e87ce148": [
+    {
+      "role": "user",
+      "content": "我叫Kevin",
+      "timestamp": "2026-04-19 17:05:12"
+    },
+    {
+      "role": "assistant",
+      "content": "哈囉 Kevin！很高興認識你。😊",
+      "timestamp": "2026-04-19 17:05:18"
+    },
+    {
+      "role": "user",
+      "content": "你記得我叫什麼嗎？",
+      "timestamp": "2026-04-19 17:07:22"
+    },
+    {
+      "role": "assistant",
+      "content": "哈囉 Kevin！我記得你叫 Kevin。😊",
+      "timestamp": "2026-04-19 17:07:24"
+    }
+  ]
+}
